@@ -1,0 +1,532 @@
+---
+title: "Stat_Learning_project_CAROTTI"
+author: "Stefano Carotti"
+date: "2024-09-15"
+output: html_document
+---
+
+# Project of Statistical Learning
+It will be composed of two parts:
+1. A classification dataset: 
+The dataset is composed by the passengers of the titanic and the dependant variable is whether the passenger survived or not.
+2. A regression dataset:
+The dataset is composed by multiple car models and the dependant variable is the miles per gallon.
+
+# Classification dataset
+### Loading the dataset and required libraries
+```{r}
+# Load the required libraries
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(randomForest)
+library(rpart)
+library(tidyverse)
+library(tidymodels)
+library(geosphere)
+library(rsample)
+library(ROSE)
+library(mgcv)
+library(vip)
+
+# Load Titanic dataset from the titanic.csv file
+dataset <- read.csv("Titanic-Dataset.csv")
+summary(dataset)
+```
+
+
+```{r}
+# Check for missing values
+sum(is.na(dataset))
+
+# Check the cabin variable, there are a lot of empty values
+table(dataset$Cabin)
+
+# Check  the variable types
+str(dataset)
+
+#Transform the necessary variables into factors
+dataset$Sex <- as.factor(dataset$Sex)
+
+dataset$Embarked <- as.factor(dataset$Embarked)
+
+dataset$Survived <- as.factor(dataset$Survived)
+
+# Re-check the variable types
+str(dataset)
+
+```
+```{r}
+# Remove the variables that are not useful for the analysis: PassengerId, Name, Ticket, and Cabin
+dataset <- dataset[, -c(1, 4, 9, 11)]
+str(dataset)
+```
+
+### Classification tree
+```{r}
+# Split the dataset into training and testing sets
+set.seed(1234)
+train <- sample(1:nrow(dataset), 0.7*nrow(dataset), replace = FALSE)
+train_data <- dataset[train, ]
+test_data <- dataset[-train, ]
+
+# Check the number of observations in the training and testing sets
+nrow(train_data)
+nrow(test_data)
+```
+```{r}
+# Build a classification tree model using decisional tree algorithm
+model <- rpart(Survived ~ ., data = train_data, method = "class")  #default options
+
+summary(model)
+```
+
+
+```{r}
+# Plot the classification tree
+library(rpart.plot)
+rpart.plot(model, main = "Classification Tree")
+plot(model, uniform = TRUE, main = "Classification Tree", margin = 0.1, branch = 0.5)
+text(model, pretty = 0)
+```
+```{r}
+# Make predictions on the test data
+predictions <- predict(model, test_data, type = "class")
+
+# Check the confusion matrix
+confusionMatrix(predictions, test_data$Survived)
+```
+Trying different cost values for the decision tree
+
+```{r}
+# Tuning on the cost complexity parameter
+
+cost <- c(0.0001, 0.001, 0.01, 0.1, 1)
+accuracy <- numeric(length(cost))
+for(i in 1:length(cost) ){
+  model <- rpart(Survived ~ ., data = train_data, method = "class", control = rpart.control(cp = cost[i]))
+  predictions <- predict(model, test_data, type = "class")
+  accuracy[i] <- confusionMatrix(predictions, test_data$Survived)$overall["Accuracy"]
+  print(accuracy[i])
+  
+}
+accuracy
+best_cost <- cost[which.max(accuracy)]
+best_cost
+```
+We can see that between 1e-04 and 1e-03 the accuracy is the highest. I will use 0.001 as the cost complexity parameter for the decision tree model.
+
+```{r}
+model <- rpart(Survived ~ ., data = train_data, method = "class", control = rpart.control(cp = 0.001))
+rpart.plot(model, main = "Classification Tree")
+```
+By decreasing the cost complexity parameter, the decision tree becomes more complex and has more splits. The accuracy is slightly higher than the previous model with the default cost complexity parameter.
+
+### Managing missing values in order to implement random forest
+I will use the missForest package to impute missing values in the dataset
+```{r}
+#missForest package
+library(missForest)
+
+# Impute missing values in the dataset
+dataset_imputed <- missForest(dataset, verbose = FALSE)
+
+# Check the dataset with imputed missing values
+summary(dataset_imputed$ximp)
+```
+Before implementing Random Forest, one last check on how the decision tree model performs with the imputed dataset
+
+```{r}
+# Split the dataset with imputed missing values into training and testing sets
+set.seed(1234)
+train_imputed <- sample(1:nrow(dataset_imputed$ximp), 0.7*nrow(dataset_imputed$ximp), replace = FALSE)
+train_data_imputed <- dataset_imputed$ximp[train_imputed, ]
+test_data_imputed <- dataset_imputed$ximp[-train_imputed, ]
+attach(train_data_imputed)
+```
+
+```{r}
+# Build a classification tree model using decisional tree algorithm
+for(i in 1:length(cost) ){
+  model_imputed <- rpart(Survived ~ ., data = train_data_imputed, method = "class", control = rpart.control(cp = cost[i]))
+  predictions_imputed <- predict(model_imputed, test_data_imputed, type = "class")
+  accuracy_imputed <- confusionMatrix(predictions_imputed, test_data_imputed$Survived)$overall["Accuracy"]
+  print(accuracy_imputed, digits = 4)
+  print(cost[i])
+  
+}
+```
+```{r}
+model_imputed <- rpart(Survived ~ ., data = train_data_imputed, method = "class", control = rpart.control(cp = 0.01))
+rpart.plot(model_imputed, main = "Classification Tree, imputed data")
+```
+We can see that the decision tree has more splits and is more complex when using the imputed dataset compared to using the same cost complexity parameter with the original dataset.
+The accuracy is slightly higher than the previous best model without imputed data. 
+
+
+### Random Forest
+```{r}
+# Build a random forest model
+model_rf <- randomForest(Survived ~ ., data = train_data_imputed, ntree = 500, importance = TRUE)
+
+summary(model_rf)
+```
+
+```{r}
+# Make predictions on the test data
+predictions_rf <- predict(model_rf, test_data_imputed)
+
+# Check the confusion matrix
+confusionMatrix(predictions_rf, test_data_imputed$Survived)
+```
+
+```{r}
+# Plot the random forest model
+plot(model_rf)
+# Check the variable importance
+importance(model_rf)
+
+varImpPlot(model_rf)
+```
+
+```{r}
+# Plot ROC curve
+library(ROCR)
+predictions_rf_prob <- predict(model_rf, test_data_imputed, type = "prob")
+pred <- performance(prediction(predictions_rf_prob[,2], test_data_imputed$Survived), "tpr", "fpr")
+plot(pred, col = "blue")
+abline(a = 0, b = 1, lty = 2, col = "red")
+```
+Let's try to improve the model by tuning the hyperparameters
+
+```{r}
+# Tune the hyperparameters of the random forest model
+ntree <- c(300, 500, 700, 900)
+mtry <- c(2, 3, 4, 5)
+accuracy_rf <- matrix(0, nrow = length(ntree), ncol = length(mtry))
+accuracy_rf <- as.data.frame(accuracy_rf)
+colnames(accuracy_rf) <- mtry
+rownames(accuracy_rf) <- ntree
+for(i in 1:length(ntree)){
+  for(j in 1:length(mtry)){
+    model_rf_tuned <- randomForest(Survived ~ ., data = train_data_imputed, ntree = ntree[i], mtry = mtry[j])
+    predictions_rf_tuned <- predict(model_rf_tuned, test_data_imputed)
+    accuracy_rf[i, j] <- confusionMatrix(predictions_rf_tuned, test_data_imputed$Survived)$overall["Accuracy"]
+    print(accuracy_rf[i, j])
+  }
+}
+accuracy_rf
+```
+The best accuracy is obtained with ntree = 700 and mtry = 3
+
+### Boosting
+Let's try extreme gradient boosting, using the imputed dataset
+```{r}
+# Build a boosting model
+#Turn the dataset into a matrix
+for(i in 1:ncol(train_data_imputed)){
+  if(class(train_data_imputed[,i]) == "factor"){
+    train_data_imputed[,i] <- as.numeric(train_data_imputed[,i])
+  }
+}
+train_data_imputed_xgb <- as.matrix(train_data_imputed)
+library(xgboost)
+model_xgb <- xgboost(data = train_data_imputed_xgb[, -1], label = train_data_imputed$Survived, nrounds = 65, verbose = 0)
+
+# Make predictions on the test data
+for(i in 1:ncol(test_data_imputed)){
+  if(class(test_data_imputed[,i]) == "factor"){
+    test_data_imputed[,i] <- as.numeric(test_data_imputed[,i])
+  }
+}
+predictions_xgb <- predict(model_xgb, as.matrix(test_data_imputed[, -1]))
+predictions_xgb <- round(predictions_xgb)
+```
+```{r}
+# Check the accuracy
+accuracy_xgb <- sum(predictions_xgb == as.numeric(test_data_imputed$Survived))/nrow(test_data_imputed)
+accuracy_xgb
+```
+
+# Regression dataset
+
+```{r}
+# Loading the data and the libraries
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(randomForest)
+library(rpart)
+library(tidyverse)
+library(tidymodels)
+library(geosphere)
+library(rsample)
+library(ROSE)
+library(mgcv)
+library(vip)
+
+data <- read.csv("auto-mpg.csv")
+```
+
+## Analysis of the data
+```{r}
+dim(data)
+head(data)
+str(data)
+```
+
+Turn the horsepower variable into a numeric variable.
+```{r}
+data$horsepower <- as.numeric(data$horsepower)
+```
+I am not interested in the name variable, so I will remove it.
+
+```{r}
+data <- data[,-9]
+```
+
+```{r}
+summary(data)
+```
+Check for missing values
+```{r}
+sum(is.na(data))
+```
+
+I have 6 missing values in the horsepower variable. I will replace them with the missForest package
+```{r}
+library(missForest)
+data <- missForest(data)
+data <- data$ximp
+```
+
+Now I will check the distribution of the target variable.
+```{r}
+attach(data)
+ggplot(data, aes(mpg)) +
+  geom_histogram(fill = "blue") +
+  labs(title = "Distribution of MPG")
+```
+
+
+
+
+### Models 
+Let's start by splitting the data into training and testing sets.
+```{r}
+set.seed(123)
+train_idx <- sample(1:nrow(data), 0.7*nrow(data))
+train_set <- data[train_idx,]
+test_set <- data[-train_idx,]
+dim(train_set)
+dim(test_set)
+```
+Let's start by fitting a linear regression model.
+```{r}
+lm_model <- lm(mpg ~ ., data = train_set)
+summary(lm_model)
+```
+Predict the test set using the linear regression model.
+```{r}
+lm_pred <- predict(lm_model, test_set)
+mse_lm <- mean((lm_pred - test_set$mpg)^2) #Mean squared error
+mse_lm
+
+```
+Check the residuals of the linear regression model.
+```{r}
+ggplot(data = data.frame(residuals = lm_model$residuals), aes(residuals)) +
+  geom_histogram(fill = "blue") +
+  labs(title = "Residuals of the linear regression model")
+```
+Check the qqplot of the residuals.
+```{r}
+qqnorm(lm_model$residuals)
+qqline(lm_model$residuals)
+```
+I also apply the Durbin-Watson test to check for autocorrelation.
+```{r}
+library(car)
+durbinWatsonTest(lm_model)
+```
+We conclude that the residuals are normally distributed enough and that there is no autocorrelation.
+
+So the linear regression model can be improved but still achieved decent results.
+An initial variable selection could be done by performing backward selection.
+```{r}
+library(MASS)
+all <- lm(mpg ~ ., data = train_set)
+back <- stepAIC(all, direction = "backward", trace = FALSE)
+back$anova
+```
+As we would have expected from the summary of the lm_model, the two least significant predictors according to the linear regression are acceleration and cylinders.
+
+I will now fit a linear regression model without the least significant predictors.
+```{r}
+lm_model2 <- lm(mpg ~ displacement + horsepower + weight + model.year, data = train_set)
+summary(lm_model2)
+mse_lm2 <- mean((predict(lm_model2, test_set) - test_set$mpg)^2)
+mse_lm2
+```
+Even though the step model selection excluded acceleration and cylinders, the model with all the predictors has a lower MSE on the test set. This as we have seen is pretty common.
+
+Now I will try a random forest model.
+```{r}
+rf_model <- randomForest(mpg ~ ., data = train_set, ntree = 500)
+rf_model
+
+```
+
+Predict the test set using the random forest model.
+```{r}
+rf_pred <- predict(rf_model, test_set)
+# Calculate the MSE
+mse_rf <- mean((rf_pred - test_set$mpg)^2)
+mse_rf
+```
+I can check the importance of the predictor variables in the random forest model.
+```{r}
+vip(rf_model)
+```
+
+I now want to try a spline regression model.
+first I will check the reationship between the target variable and the predictor variables.
+
+```{r}
+for(j in 1:ncol(data))
+  {
+   
+   print(ggplot(data, aes(data[,j], mpg)) + # Creating a plot for each predictor variable
+           geom_point(color = "blue") +
+           labs(title = paste("Relationship between", colnames(data)[j], "and mpg")))
+  
+}
+```
+I will now fit a spline regression model.
+First, I will check the unique values of the cylinders variable.
+```{r}
+unique(data$cylinders)
+```
+
+```{r}
+# Fitting the spline model
+spl_model <- gam(mpg ~ s(cylinders, k = 3) + s(displacement) + s(horsepower) + s(weight) + s(acceleration) + s(model.year) , data = train_set)
+summary(spl_model) 
+
+```
+Predict the test set using the spline regression model.
+```{r}
+spl_pred <- predict(spl_model, test_set)
+# Calculate the MSE
+mse_spl <- mean((spl_pred - test_set$mpg)^2)
+mse_spl
+```
+Plot the spline regression model with the confidence intervals and the data points.
+```{r}
+
+plot(spl_model, se = TRUE, col = "blue")
+```
+Check the residuals of the spline regression model.
+```{r}
+ggplot(data = data.frame(residuals = spl_model$residuals), aes(residuals)) +
+  geom_histogram(fill = "blue") +
+  labs(title = "Residuals of the spline regression model")
+```
+Check the qqplot of the residuals.
+```{r}
+qqnorm(spl_model$residuals)
+qqline(spl_model$residuals)
+```
+
+Let's compare the linear and spline regression using anova.
+```{r}
+anova(lm_model, spl_model)
+```
+The spline regression model is better than the linear regression model.
+
+I want to anova test all the predictors in the spline regression model.
+```{r}
+anova(spl_model)
+```
+Try a spline with linear cylinderrs, displacement and acceleration.
+```{r}
+spl_model2 <- gam(mpg ~ cylinders + displacement + s(horsepower) + s(weight) + acceleration + s(model.year) , data = train_set)
+summary(spl_model2)
+
+spl_pred2 <- predict(spl_model2, test_set)
+mse_spl2 <- mean((spl_pred2 - test_set$mpg)^2)
+mse_spl2
+```
+Compare the two spline models.
+```{r}
+anova(spl_model, spl_model2)
+```
+The model with the linear cylinders, displacement, and acceleration is better than the model with those predictors not linear.
+
+Let's try a model that only includes the most significant predictors.
+```{r}
+spl_model3 <- gam(mpg ~ s(horsepower) + s(weight) + s(model.year) , data = train_set)
+summary(spl_model3)
+```
+Predict the test set using the spline regression model.
+```{r}
+spl_pred3 <- predict(spl_model3, test_set)
+# Calculate the MSE
+mse_spl3 <- mean((spl_pred3 - test_set$mpg)^2)
+mse_spl3
+```
+
+Let's compare the spline regression models.
+```{r}
+anova(spl_model, spl_model3)
+```
+The model with the most significant predictors is better than the model with all the predictors.
+
+Random forest found displacement, weight, and horsepower to be the most important predictors.
+While the spline regression model found horsepower, weight, and model year to be the most important predictors.
+This could mean that displacement is correlated with weight and/or horsepower
+```{r}
+cor(data$displacement, data$weight)
+cor(data$displacement, data$horsepower)
+```
+So displacement is higly correlated with weight and horsepower. This could be the reason why the spline regression model did not find displacement to be a significant predictor.
+
+I could try to reduce the dimensionality of the data using PCA.
+```{r}
+pca <- prcomp(train_set[, -1], scale = TRUE)
+summary(pca)
+```
+
+I will try to fit a linear regression model using the first 3 principal components.
+```{r}
+pca_train <- as.data.frame(cbind(train_set$mpg, pca$x[,1:3]))
+colnames(pca_train) <- c("mpg", "PC1", "PC2", "PC3")
+lm_pca <- lm(mpg ~ PC1 + PC3 , data = pca_train)
+summary(lm_pca)
+```
+
+Predict the test set using the linear regression model with PCA.
+```{r}
+pca_test <- as.data.frame(cbind(test_set$mpg, predict(pca, test_set[, -1])[,1:3]))
+colnames(pca_test) <- c("mpg", "PC1", "PC2", "PC3")
+lm_pca_pred <- predict(lm_pca, pca_test)
+# Calculate the MSE
+mse_lm_pca <- mean((lm_pca_pred - pca_test$mpg)^2)
+mse_lm_pca
+```
+
+Even though the PCA linear model has a lower R squared, it has a lower MSE on the test set than the linear model with all the predictors.
+
+At last let's use a spline regression model with the principal components.
+```{r}
+spl_pca <- gam(mpg ~ s(PC1) + s(PC3), data = pca_train)
+summary(spl_pca)
+```
+Predict the test set using the spline regression model with PCA.
+```{r}
+spl_pca_pred <- predict(spl_pca, pca_test)
+# Calculate the MSE
+mse_spl_pca <- mean((spl_pca_pred - pca_test$mpg)^2)
+mse_spl_pca
+```
+I achieved a comparable MSE with the spline regression model with PCA compared to the spline regression model with the most significant predictors.
